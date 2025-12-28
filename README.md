@@ -1,2 +1,2 @@
-# minizip
+# minibackup
 Course-Compressor
