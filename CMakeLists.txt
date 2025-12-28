@@ -12,5 +12,8 @@ include_directories(include)
 
 # 4. 生成可执行文件
 add_executable(minibackup
-    src/main.cpp
-    src/BackupEngine.cpp)
+        src/main.cpp
+        src/BackupEngine.cpp
+        include/BackupEngine.h
+        include/CRC32.h
+)

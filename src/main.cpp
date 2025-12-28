@@ -5,39 +5,58 @@
 
 void printUsage() {
     std::cout << "Usage:\n"
-              << "  minibackup backup <src> <dest>\n"
-              << "  minibackup restore <src> <dest>\n"
-              << "  minibackup verify <src> <dest>\n";
+              << "  minibackup backup <src_dir> <backup_dir>\n"
+              << "  minibackup restore <backup_dir> <target_dir>\n"
+              << "  minibackup verify <backup_dir>\n";
 }
 
-int main(int argc, char* argv[]) {
-    if (argc < 4) {
+int main(const int argc, char* argv[]) {
+    // 程序名 命令 参数1
+    if (argc < 3) {
         printUsage();
         return 1;
     }
 
-    std::string command = argv[1];
-    std::string src = argv[2];
-    std::string dest = argv[3];
+    const std::string command = argv[1];
 
     try {
         if (command == "backup") {
-            std::cout << "Starting Backup..." << std::endl;
-            BackupEngine::copyDirectory(src, dest);
+            if (argc < 4) {
+                std::cerr << "[Error] Missing arguments for backup.\n";
+                printUsage();
+                return 1;
+            }
+            const std::string src = argv[2];
+            const std::string dest = argv[3];
+
+            BackupEngine::backup(src, dest);
+
         } else if (command == "restore") {
-            std::cout << "Starting Restore..." << std::endl;
-            // 还原逻辑和备份是一样的，只是在语义上区分
-            BackupEngine::copyDirectory(src, dest);
+            if (argc < 4) {
+                std::cerr << "[Error] Missing arguments for restore.\n";
+                printUsage();
+                return 1;
+            }
+            const std::string src = argv[2];
+            const std::string dest = argv[3];
+
+            BackupEngine::restore(src, dest);
+
         } else if (command == "verify") {
-            std::cout << "Verifying..." << std::endl;
-            bool result = BackupEngine::verifyBackup(src, dest);
-            return result ? 0 : -1; // 返回 0 表示成功，非 0 失败（给脚本判断用）
+
+            if (const std::string dest = argv[2]; BackupEngine::verify(dest)) {
+                std::cout << "Verification Passed: All files match the index." << std::endl;
+                return 0;
+            }
+            std::cerr << "Verification Failed: Backup corrupted or incomplete." << std::endl;
+            return -1;
         } else {
+            std::cerr << "[Error] Unknown command: " << command << "\n";
             printUsage();
             return 1;
         }
     } catch (const std::exception& e) {
-        std::cerr << "Operation failed: " << e.what() << std::endl;
+        std::cerr << "[Fatal Error] " << e.what() << std::endl;
         return 1;
     }
 
