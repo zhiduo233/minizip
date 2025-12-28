@@ -2,3 +2,8 @@
 cmake-build-*
 build
 .idea
+my_backup
+my_data
+.pck
+test_src
+test_dest

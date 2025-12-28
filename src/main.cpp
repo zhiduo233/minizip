@@ -7,11 +7,12 @@ void printUsage() {
     std::cout << "Usage:\n"
               << "  minibackup backup <src_dir> <backup_dir>\n"
               << "  minibackup restore <backup_dir> <target_dir>\n"
-              << "  minibackup verify <backup_dir>\n";
+              << "  minibackup verify <backup_dir>\n"
+              << "  minibackup pack <src_dir> <output_file.pck>\n"   // [新增]
+              << "  minibackup unpack <input_file.pck> <dest_dir>\n"; // [新增]
 }
 
 int main(const int argc, char* argv[]) {
-    // 程序名 命令 参数1
     if (argc < 3) {
         printUsage();
         return 1;
@@ -26,10 +27,7 @@ int main(const int argc, char* argv[]) {
                 printUsage();
                 return 1;
             }
-            const std::string src = argv[2];
-            const std::string dest = argv[3];
-
-            BackupEngine::backup(src, dest);
+            BackupEngine::backup(argv[2], argv[3]);
 
         } else if (command == "restore") {
             if (argc < 4) {
@@ -37,19 +35,38 @@ int main(const int argc, char* argv[]) {
                 printUsage();
                 return 1;
             }
-            const std::string src = argv[2];
-            const std::string dest = argv[3];
-
-            BackupEngine::restore(src, dest);
+            BackupEngine::restore(argv[2], argv[3]);
 
         } else if (command == "verify") {
-
-            if (const std::string dest = argv[2]; BackupEngine::verify(dest)) {
+            // verify 只需要 1 个路径参数
+            if (BackupEngine::verify(argv[2])) {
                 std::cout << "Verification Passed: All files match the index." << std::endl;
                 return 0;
+            } else {
+                std::cerr << "Verification Failed: Backup corrupted or incomplete." << std::endl;
+                return -1;
             }
-            std::cerr << "Verification Failed: Backup corrupted or incomplete." << std::endl;
-            return -1;
+
+        } else if (command == "pack") {
+            // [新增] 打包命令
+            if (argc < 4) {
+                std::cerr << "[Error] Missing arguments for pack.\n";
+                printUsage();
+                return 1;
+            }
+            // 参数2是源目录，参数3是目标文件
+            BackupEngine::pack(argv[2], argv[3]);
+
+        } else if (command == "unpack") {
+            // [新增] 解包命令
+            if (argc < 4) {
+                std::cerr << "[Error] Missing arguments for unpack.\n";
+                printUsage();
+                return 1;
+            }
+            // 参数2是包文件，参数3是解压目录
+            BackupEngine::unpack(argv[2], argv[3]);
+
         } else {
             std::cerr << "[Error] Unknown command: " << command << "\n";
             printUsage();

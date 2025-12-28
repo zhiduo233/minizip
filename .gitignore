@@ -7,7 +7,8 @@
 *.swo
 my_backup/
 my_data/
-
+test_src/
+test_dest/
 # ==========================
 # 2. CMake 构建产物 (CLion 默认生成的文件夹)
 # ==========================
@@ -34,6 +35,7 @@ install_manifest.txt
 *.exe
 *.out
 *.app
+*.pck
 
 # ==========================
 # 4. 系统垃圾文件 (防止队友是 Mac/Windows 混用)
