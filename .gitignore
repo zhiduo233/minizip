@@ -5,6 +5,8 @@
 .vscode/
 *.swp
 *.swo
+my_backup/
+my_data/
 
 # ==========================
 # 2. CMake 构建产物 (CLion 默认生成的文件夹)

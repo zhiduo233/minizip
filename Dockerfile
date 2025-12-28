@@ -15,5 +15,5 @@ COPY . .
 RUN mkdir build && cd build && cmake .. && make
 
 # 6. 设置容器启动时的默认命令
-# 运行容器时，自动执行编译好的 minizip 程序
+# 运行容器时，自动执行编译好的 minibackup 程序
 CMD ["./build/minibackup"]
