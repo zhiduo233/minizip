@@ -6,6 +6,14 @@
 #include <vector>
 #include <numeric> // for std::swap
 
+#ifdef _WIN32
+    // Windows 没有 getuid，简单定义模拟
+    #define stat _stat
+#else
+    #include <sys/stat.h>
+    #include <unistd.h>
+#endif
+
 // ==========================================
 // 核心算法实现区
 // ==========================================
@@ -13,8 +21,7 @@
 // --- 算法 1: RC4 (Rivest Cipher 4) ---
 // 标准流密码算法
 class RC4 {
-private:
-    unsigned char S[256];
+    unsigned char S[256]{};
     int i = 0, j = 0;
 
 public:
@@ -35,12 +42,12 @@ public:
 
     // PRGA (Pseudo-random generation algorithm)
     // 加密和解密通用 (异或特性)
-    void cipher(char* buffer, size_t size) {
+    void cipher(char* buffer, const size_t size) {
         for (size_t k = 0; k < size; ++k) {
             i = (i + 1) % 256;
             j = (j + S[i]) % 256;
             std::swap(S[i], S[j]);
-            unsigned char rnd = S[(S[i] + S[j]) % 256];
+            const unsigned char rnd = S[(S[i] + S[j]) % 256];
             buffer[k] ^= rnd;
         }
     }
@@ -48,12 +55,63 @@ public:
 
 // --- 算法 2: Simple XOR ---
 // 基础算法
-void xorEncrypt(char* buffer, size_t size, const std::string& password) {
+void xorEncrypt(char* buffer, const size_t size, const std::string& password) {
     if (password.empty()) return;
-    size_t pwdLen = password.length();
+    const size_t pwdLen = password.length();
     for (size_t k = 0; k < size; ++k) {
         buffer[k] ^= password[k % pwdLen];
     }
+}
+
+// [新增] 内部辅助：检查文件是否满足筛选条件
+// 返回 true 表示通过筛选（需要备份），false 表示跳过
+bool checkFilter(const fs::directory_entry& entry, const FilterOptions& opts) {
+    // 1. 名字筛选
+    if (!opts.nameContains.empty()) {
+        if (const std::string filename = entry.path().filename().string(); filename.find(opts.nameContains) == std::string::npos) return false;
+    }
+
+    // 2. 路径筛选
+    if (!opts.pathContains.empty()) {
+        if (entry.path().string().find(opts.pathContains) == std::string::npos) return false;
+    }
+
+    // 3. 类型筛选 (0=Reg, 1=Dir, 2=Link)
+    if (opts.type != -1) {
+        if (opts.type == 0 && !fs::is_regular_file(entry)) return false;
+        if (opts.type == 1 && !fs::is_directory(entry)) return false;
+        if (opts.type == 2 && !fs::is_symlink(entry)) return false;
+    }
+
+    // 对于目录本身，通常不应用尺寸和时间筛选，否则目录不进去，里面的文件也扫不到
+    // 为了严谨，只对"非目录"应用以下筛选，或者根据具体需求调整
+    if (fs::is_directory(entry)) return true;
+
+    // 4. 尺寸筛选 (仅针对普通文件)
+    if (fs::is_regular_file(entry)) {
+        const uint64_t size = fs::file_size(entry.path());
+        if (opts.minSize > 0 && size < opts.minSize) return false;
+        if (opts.maxSize > 0 && size > opts.maxSize) return false;
+    }
+
+    // 5. 时间筛选 (修改时间)
+    if (opts.startTime > 0) {
+        const auto ftime = fs::last_write_time(entry);
+        // C++17 转换 file_time_type 到 time_t 比较繁琐，这里简化处理
+        // 获取秒数 (近似)
+        const auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+        if (const long long timestamp = sctp.time_since_epoch().count(); timestamp < opts.startTime) return false;
+    }
+
+    // 6. 用户筛选 (仅 Linux 有效，Windows 默认通过)
+    if (opts.targetUid != -1) {
+        struct stat st{};
+        if (stat(entry.path().string().c_str(), &st) == 0) {
+            if (st.st_uid != static_cast<unsigned int>(opts.targetUid)) return false;
+        }
+    }
+
+    return true;
 }
 
 // ==========================================
@@ -129,8 +187,7 @@ bool BackupEngine::verify(const std::string& destPath) {
                 errorCount++;
                 continue;
             }
-            std::string currentCRC = CRC32::getFileCRC(currentFile.string());
-            if (currentCRC != expectedCRC) {
+            if (std::string currentCRC = CRC32::getFileCRC(currentFile.string()); currentCRC != expectedCRC) {
                 std::cerr << "[CORRUPT] " << relPath << " (Exp: " << expectedCRC << ", Act: " << currentCRC << ")" << std::endl;
                 errorCount++;
             }
@@ -143,15 +200,14 @@ bool BackupEngine::verify(const std::string& destPath) {
     if (errorCount == 0) {
         std::cout << "[Verify] Passed. Checked " << checkedCount << " files." << std::endl;
         return true;
-    } else {
-        std::cerr << "[Verify] FAILED. Found " << errorCount << " errors." << std::endl;
-        return false;
     }
+    std::cerr << "[Verify] FAILED. Found " << errorCount << " errors." << std::endl;
+    return false;
 }
 
 void BackupEngine::restore(const std::string& srcPath, const std::string& destPath) {
-    fs::path backupDir(srcPath);
-    fs::path targetDir(destPath);
+    const fs::path backupDir(srcPath);
+    const fs::path targetDir(destPath);
     if (!fs::exists(targetDir)) fs::create_directories(targetDir);
 
     int failCount = 0;
@@ -175,12 +231,18 @@ void BackupEngine::restore(const std::string& srcPath, const std::string& destPa
 }
 
 // === 目录遍历算法 ===
-std::vector<FileRecord> BackupEngine::scanDirectory(const std::string& srcPath) {
+std::vector<FileRecord> BackupEngine::scanDirectory(const std::string& srcPath, const FilterOptions& filter) {
     std::vector<FileRecord> fileList;
-    fs::path source(srcPath);
+    const fs::path source(srcPath);
     if (!fs::exists(source)) return fileList;
 
     for (const auto& entry : fs::recursive_directory_iterator(source, fs::directory_options::skip_permission_denied)) {
+
+        // [核心修改] 在这里进行筛选
+        if (!checkFilter(entry, filter)) {
+            continue; // 不满足条件，跳过
+        }
+
         FileRecord record;
         record.absPath = entry.path().string();
         record.relPath = fs::relative(entry.path(), source).string();
@@ -238,12 +300,12 @@ void BackupEngine::packFiles(const std::vector<FileRecord>& files, const std::st
         metaBuffer.push_back(static_cast<char>(typeCode));
 
         uint64_t pathLen = rec.relPath.size();
-        const char* pLen = reinterpret_cast<const char*>(&pathLen);
+        auto pLen = reinterpret_cast<const char*>(&pathLen);
         metaBuffer.insert(metaBuffer.end(), pLen, pLen + 8);
         metaBuffer.insert(metaBuffer.end(), rec.relPath.begin(), rec.relPath.end());
 
         uint64_t dataSize = rec.size;
-        const char* pSize = reinterpret_cast<const char*>(&dataSize);
+        auto pSize = reinterpret_cast<const char*>(&dataSize);
         metaBuffer.insert(metaBuffer.end(), pSize, pSize + 8);
 
         // 加密元数据
@@ -258,8 +320,7 @@ void BackupEngine::packFiles(const std::vector<FileRecord>& files, const std::st
 
         // 处理文件内容/软链目标
         if (rec.type == FileType::REGULAR) {
-            std::ifstream inFile(rec.absPath, std::ios::binary);
-            if (inFile) {
+            if (std::ifstream inFile(rec.absPath, std::ios::binary); inFile) {
                 char buffer[4096];
                 while (inFile.read(buffer, sizeof(buffer)) || inFile.gcount() > 0) {
                     std::streamsize bytesRead = inFile.gcount();
@@ -295,11 +356,16 @@ void BackupEngine::packFiles(const std::vector<FileRecord>& files, const std::st
     std::cout << "[Pack] Done. Items: " << count << ", Encrypt: " << modeStr << std::endl;
 }
 
-// Pack 入口
-void BackupEngine::pack(const std::string& srcPath, const std::string& outputFile, const std::string& password, EncryptionMode mode) {
-    std::cout << "Scanning..." << std::endl;
-    auto files = scanDirectory(srcPath);
-    std::cout << "Packing..." << std::endl;
+// 修改：pack 入口传入 filter
+void BackupEngine::pack(const std::string& srcPath, const std::string& outputFile,
+                        const std::string& password, const EncryptionMode mode,
+                        const FilterOptions& filter) {
+
+    std::cout << "Scanning with filters..." << std::endl;
+    // 传入 filter
+    const auto files = scanDirectory(srcPath, filter);
+
+    std::cout << "Packing " << files.size() << " files..." << std::endl;
     packFiles(files, outputFile, password, mode);
 }
 
@@ -316,7 +382,7 @@ void BackupEngine::unpack(const std::string& packFile, const std::string& destPa
     in.read(magic, 8);
     std::string magicStr(magic);
 
-    EncryptionMode mode = EncryptionMode::NONE;
+    auto mode = EncryptionMode::NONE;
     if (magicStr == "MINIBK_R") mode = EncryptionMode::RC4;
     else if (magicStr == "MINIBK_X") mode = EncryptionMode::XOR;
     else if (magicStr == "MINIBK10") mode = EncryptionMode::NONE;
@@ -339,7 +405,7 @@ void BackupEngine::unpack(const std::string& packFile, const std::string& destPa
 
         if (mode == EncryptionMode::RC4) rc4.cipher(typeBuf, 1);
         else if (mode == EncryptionMode::XOR) xorEncrypt(typeBuf, 1, password);
-        uint8_t typeCode = static_cast<uint8_t>(typeBuf[0]);
+        auto typeCode = static_cast<uint8_t>(typeBuf[0]);
 
         // 读取 PathLen
         char lenBuf[8];
@@ -386,7 +452,7 @@ void BackupEngine::unpack(const std::string& packFile, const std::string& destPa
             char buffer[4096];
             uint64_t remaining = dataSize;
             while (remaining > 0) {
-                uint64_t toRead = (remaining < sizeof(buffer)) ? remaining : sizeof(buffer);
+                uint64_t toRead = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
                 in.read(buffer, static_cast<std::streamsize>(toRead));
 
                 if (mode == EncryptionMode::RC4) rc4.cipher(buffer, toRead);

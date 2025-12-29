@@ -137,3 +137,55 @@ make
 
 ## 5. 开发者指南 (For GUI Team)
 本项目已生成动态库 libcore.so，并暴露了 C 风格接口，位于 src/Bridge.cpp。
+
+## 6.filter
+
+### 1. 筛选逻辑说明
+所有的筛选条件采用 **AND (且)** 逻辑。
+例如：如果同时设置了 `nameContains=".txt"` 和 `minSize=1024`，则**只有**同时满足“文件名包含.txt”**且**“大小大于1KB”的文件会被备份。
+
+### 2. 参数详解 (Filter Parameters)
+
+以下参数对应 C++ 核心中的 `FilterOptions` 结构体：
+
+| 参数名 (Field) | 数据类型 | 单位/范围 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| **nameContains** | String (Bytes) | - | `None` | **文件名筛选**。<br>只备份文件名包含此字符串的文件。<br>例：`b".txt"` |
+| **pathContains** | String (Bytes) | - | `None` | **路径筛选**。<br>只备份相对路径包含此字符串的文件。<br>例：`b"src/"` |
+| **type** | Int | 枚举值 | `-1` | **文件类型筛选**。<br>`-1`: 全部 (不限)<br>`0`: 普通文件<br>`1`: 目录<br>`2`: 软链接 (Symlink) |
+| **minSize** | UInt64 | **字节 (Bytes)** | `0` | **最小尺寸**。<br>只备份大小 $\ge$ 此值的文件。<br>换算：1KB=1024, 1MB=1048576 |
+| **maxSize** | UInt64 | **字节 (Bytes)** | `0` | **最大尺寸**。<br>只备份大小 $\le$ 此值的文件。<br>`0` 表示不限制上限。 |
+| **startTime** | Int64 | **Unix时间戳 (秒)** | `0` | **时间筛选**。<br>只备份**修改时间**晚于此时间点及其之后的文件。<br>用于增量备份场景。 |
+| **targetUid** | Int | UID 数值 | `-1` | **用户筛选 (Linux)**。<br>只备份属于特定 User ID 的文件。<br>`-1` 表示不限制。 |
+
+---
+
+### 3. Python 调用示例
+
+在 Python 中使用 `ctypes` 调用时，需先定义对应的结构体：
+
+```python
+import ctypes
+
+# 1. 定义 C 结构体映射
+class CFilter(ctypes.Structure):
+    _fields_ = [
+        ("nameContains", ctypes.c_char_p),
+        ("pathContains", ctypes.c_char_p),
+        ("type", ctypes.c_int),
+        ("minSize", ctypes.c_ulonglong),
+        ("maxSize", ctypes.c_ulonglong),
+        ("startTime", ctypes.c_longlong),
+        ("targetUid", ctypes.c_int)
+    ]
+
+# 2. 初始化筛选器 (所有条件默认不限制)
+my_filter = CFilter()
+my_filter.nameContains = None
+my_filter.pathContains = None
+my_filter.type = -1
+my_filter.minSize = 0
+my_filter.maxSize = 0
+my_filter.startTime = 0
+my_filter.targetUid = -1
+```

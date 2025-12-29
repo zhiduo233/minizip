@@ -11,6 +11,17 @@
     #define LIBRARY_API
 #endif
 
+// 定义一个纯 C 的结构体，与 Python 里的 ctypes.Structure 对应
+struct CFilter {
+    const char* nameContains;
+    const char* pathContains;
+    int type;
+    unsigned long long minSize;
+    unsigned long long maxSize;
+    long long startTime;
+    int targetUid;
+};
+
 extern "C" {
 
     // 1. 备份接口
@@ -44,9 +55,39 @@ extern "C" {
     }
 
     // 4. 打包接口
-    LIBRARY_API int C_Pack(const char* src, const char* pckFile, const char* pwd, int mode) {
+    LIBRARY_API int C_PackWithFilter(const char* src, const char* pckFile,
+                                     const char* pwd, int mode,
+                                     const CFilter* c_filter) { // <--- 改成了指针 *
         try {
-            EncryptionMode cppMode = EncryptionMode::NONE;
+            auto cppMode = EncryptionMode::NONE;
+            if (mode == 1) cppMode = EncryptionMode::XOR;
+            else if (mode == 2) cppMode = EncryptionMode::RC4;
+
+            FilterOptions opts;
+
+            // [修改] 因为是指针，访问成员要用 -> 而不是 .
+            // 还需要检查指针是否为 NULL (防御性编程)
+            if (c_filter) {
+                if (c_filter->nameContains) opts.nameContains = c_filter->nameContains;
+                if (c_filter->pathContains) opts.pathContains = c_filter->pathContains;
+                opts.type = c_filter->type;
+                opts.minSize = c_filter->minSize;
+                opts.maxSize = c_filter->maxSize;
+                opts.startTime = c_filter->startTime;
+                opts.targetUid = c_filter->targetUid;
+            }
+
+            BackupEngine::pack(src, pckFile, pwd, cppMode, opts);
+            return 1;
+        } catch (...) {
+            return 0;
+        }
+    }
+
+    // 保留原来的 C_Pack，只是内部使用默认 filter
+    LIBRARY_API int C_Pack(const char* src, const char* pckFile, const char* pwd, const int mode) {
+        try {
+            auto cppMode = EncryptionMode::NONE;
             if (mode == 1) cppMode = EncryptionMode::XOR;
             else if (mode == 2) cppMode = EncryptionMode::RC4;
 

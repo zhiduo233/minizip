@@ -32,6 +32,28 @@ enum class EncryptionMode {
     RC4   // RC4 流密码 (算法2 - 进阶)
 };
 
+struct FilterOptions {
+    // 1. 名字筛选 : 如果不为空，只备份文件名包含此字符串的文件
+    std::string nameContains;
+
+    // 2. 路径筛选: 如果不为空，只备份路径包含此字符串的文件
+    std::string pathContains;
+
+    // 3. 类型筛选: 如果不为 -1，只备份指定类型 (0=File, 1=Dir, 2=Link)
+    int type = -1;
+
+    // 4. 尺寸筛选: 只备份大小 >= minSize 且 <= maxSize 的文件
+    // 0 表示不限制
+    uint64_t minSize = 0;
+    uint64_t maxSize = 0;
+
+    // 5. 时间筛选: 只备份修改时间 >= startTime (Unix时间戳) 的文件
+    long long startTime = 0;
+
+    // 6. 用户筛选: 只备份属于指定 UID (User ID) 的文件 (-1表示不限制)
+    int targetUid = -1;
+};
+
 class BackupEngine {
 public:
     // === 基础功能 ===
@@ -44,7 +66,8 @@ public:
     // pack: 支持指定密码和加密模式
     static void pack(const std::string& srcPath, const std::string& outputFile,
                      const std::string& password = "",
-                     EncryptionMode mode = EncryptionMode::NONE);
+                     EncryptionMode mode = EncryptionMode::NONE,
+                     const FilterOptions& filter = FilterOptions()); // 默认全选
 
     // unpack: 只需要密码，模式由文件头自动识别
     static void unpack(const std::string& packFile, const std::string& destPath,
@@ -52,7 +75,7 @@ public:
 
 private:
     // 内部辅助函数
-    static std::vector<FileRecord> scanDirectory(const std::string& srcPath);
+    static std::vector<FileRecord> scanDirectory(const std::string& srcPath, const FilterOptions& filter);
     static void packFiles(const std::vector<FileRecord>& files, const std::string& outputFile,
                           const std::string& password, EncryptionMode mode);
 };

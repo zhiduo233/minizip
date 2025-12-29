@@ -42,10 +42,10 @@ int main(const int argc, char* argv[]) {
                 return 1;
             }
             // 解析可选参数
-            std::string pwd = (argc >= 5) ? argv[4] : "";
-            std::string algFlag = (argc >= 6) ? argv[5] : "";
+            const std::string pwd = argc >= 5 ? argv[4] : "";
+            const std::string algFlag = argc >= 6 ? argv[5] : "";
 
-            EncryptionMode mode = EncryptionMode::NONE;
+            auto mode = EncryptionMode::NONE;
             if (!pwd.empty()) {
                 // 如果有密码，默认 XOR，指定 -rc4 则用 RC4
                 if (algFlag == "-rc4") mode = EncryptionMode::RC4;
@@ -59,7 +59,7 @@ int main(const int argc, char* argv[]) {
                 std::cerr << "Missing args for unpack.\n";
                 return 1;
             }
-            std::string pwd = (argc >= 5) ? argv[4] : "";
+            const std::string pwd = argc >= 5 ? argv[4] : "";
             BackupEngine::unpack(argv[2], argv[3], pwd);
 
         } else {
