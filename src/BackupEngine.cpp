@@ -281,6 +281,14 @@ std::vector<FileRecord> BackupEngine::scanDirectory(const std::string& srcPath, 
         record.absPath = entry.path().string();
         record.relPath = fs::relative(entry.path(), source).string();
 
+        struct stat st{};
+        if (stat(record.absPath.c_str(), &st) == 0) {
+            record.mode = st.st_mode;
+            record.mtime = st.st_mtime;
+            record.uid = st.st_uid;
+            record.gid = st.st_gid;
+        }
+
         if (fs::is_symlink(entry)) {
             record.type = FileType::SYMLINK;
             record.linkTarget = fs::read_symlink(entry.path()).string();
@@ -365,8 +373,20 @@ void BackupEngine::packFiles(const std::vector<FileRecord>& files, const std::st
         metaBuffer.insert(metaBuffer.end(), rec.relPath.begin(), rec.relPath.end());
 
         uint64_t finalSize = fileData.size(); // 处理后的大小
-        const char* pSize = reinterpret_cast<const char*>(&finalSize);
+        auto pSize = reinterpret_cast<const char*>(&finalSize);
         metaBuffer.insert(metaBuffer.end(), pSize, pSize + 8);
+
+        auto pMode = reinterpret_cast<const char*>(&rec.mode);
+        metaBuffer.insert(metaBuffer.end(), pMode, pMode + 4); // mode 是 32位 (4字节)
+
+        auto pUid = reinterpret_cast<const char*>(&rec.uid);
+        metaBuffer.insert(metaBuffer.end(), pUid, pUid + 4);
+
+        auto pGid = reinterpret_cast<const char*>(&rec.gid);
+        metaBuffer.insert(metaBuffer.end(), pGid, pGid + 4);
+
+        auto pTime = reinterpret_cast<const char*>(&rec.mtime);
+        metaBuffer.insert(metaBuffer.end(), pTime, pTime + 8); // mtime 是 64位 (8字节)
 
         // 加密 Meta
         if (encMode == EncryptionMode::RC4 && !password.empty()) rc4.cipher(metaBuffer.data(), metaBuffer.size());
@@ -413,7 +433,7 @@ void BackupEngine::unpack(const std::string& packFile, const std::string& destPa
     in.read(magic, 8);
     std::string magicStr(magic);
 
-    EncryptionMode encMode = EncryptionMode::NONE;
+    auto encMode = EncryptionMode::NONE;
     if (magicStr == "MINIBK_R") encMode = EncryptionMode::RC4;
     else if (magicStr == "MINIBK_X") encMode = EncryptionMode::XOR;
     else if (magicStr != "MINIBK10") throw std::runtime_error("Unknown file format");
@@ -465,6 +485,31 @@ void BackupEngine::unpack(const std::string& packFile, const std::string& destPa
         else if (encMode == EncryptionMode::XOR) xorEncrypt(sizeBuf, 8, password);
         uint64_t dataSize = *reinterpret_cast<uint64_t*>(sizeBuf);
 
+        // 5. 读取元数据
+        // Mode (4)
+        char modeBuf[4]; in.read(modeBuf, 4);
+        if (encMode == EncryptionMode::RC4) rc4.cipher(modeBuf, 4);
+        else if (encMode == EncryptionMode::XOR) xorEncrypt(modeBuf, 4, password);
+        uint32_t f_mode = *reinterpret_cast<uint32_t*>(modeBuf);
+
+        // Uid (4)
+        char uidBuf[4]; in.read(uidBuf, 4);
+        if (encMode == EncryptionMode::RC4) rc4.cipher(uidBuf, 4);
+        else if (encMode == EncryptionMode::XOR) xorEncrypt(uidBuf, 4, password);
+        uint32_t f_uid = *reinterpret_cast<uint32_t*>(uidBuf);
+
+        // Gid (4)
+        char gidBuf[4]; in.read(gidBuf, 4);
+        if (encMode == EncryptionMode::RC4) rc4.cipher(gidBuf, 4);
+        else if (encMode == EncryptionMode::XOR) xorEncrypt(gidBuf, 4, password);
+        uint32_t f_gid = *reinterpret_cast<uint32_t*>(gidBuf);
+
+        // Mtime (8)
+        char timeBuf[8]; in.read(timeBuf, 8);
+        if (encMode == EncryptionMode::RC4) rc4.cipher(timeBuf, 8);
+        else if (encMode == EncryptionMode::XOR) xorEncrypt(timeBuf, 8, password);
+        int64_t f_mtime = *reinterpret_cast<int64_t*>(timeBuf);
+
         // --- 读取并处理数据 ---
         fs::path fullPath = destRoot / relPath;
 
@@ -496,6 +541,22 @@ void BackupEngine::unpack(const std::string& packFile, const std::string& destPa
             if (fullPath.has_parent_path()) fs::create_directories(fullPath.parent_path());
             std::ofstream outFile(fullPath, std::ios::binary);
             outFile.write(fileData.data(), fileData.size());
+        }
+        try {
+            // 1. 恢复权限
+            chmod(fullPath.string().c_str(), f_mode);
+
+            // 2. 恢复所有者 (需要 root 权限，Docker 里通常是 root)
+            chown(fullPath.string().c_str(), f_uid, f_gid);
+
+            // 3. 恢复修改时间
+            struct utimbuf new_times{};
+            new_times.actime = f_mtime;  // 访问时间也设为修改时间
+            new_times.modtime = f_mtime; // 修改时间
+            utime(fullPath.string().c_str(), &new_times);
+
+        } catch (...) {
+            // 某些系统可能不支持，忽略错误
         }
     }
 }
