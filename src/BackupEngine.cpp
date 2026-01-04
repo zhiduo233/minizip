@@ -6,12 +6,18 @@
 #include <vector>
 #include <numeric> // for std::swap
 
+#include <sys/stat.h>
+#include <sys/types.h>
+
 #ifdef _WIN32
-    // Windows 没有 getuid，简单定义模拟
-    #define stat _stat
+    // Windows 兼容性空实现 (防止报错)
+    #define chmod(path, mode) 0
+    #define chown(path, uid, gid) 0
+    #define utime(path, buf) 0
+    struct utimbuf { long actime; long modtime; };
 #else
-    #include <sys/stat.h>
-    #include <unistd.h>
+#include <unistd.h>
+#include <utime.h> // 用于恢复时间
 #endif
 
 // ==========================================
@@ -63,7 +69,7 @@ void xorEncrypt(char* buffer, const size_t size, const std::string& password) {
     }
 }
 
-// [新增] 内部辅助：检查文件是否满足筛选条件
+// // --- 算法 3: 筛选器 ---
 // 返回 true 表示通过筛选（需要备份），false 表示跳过
 bool checkFilter(const fs::directory_entry& entry, const FilterOptions& opts) {
     // 1. 名字筛选
@@ -112,6 +118,34 @@ bool checkFilter(const fs::directory_entry& entry, const FilterOptions& opts) {
     }
 
     return true;
+}
+
+// --- 算法 4: RLE压缩算法 ---
+void rleCompress(const std::vector<char>& input, std::vector<char>& output) {
+    if (input.empty()) return;
+    for (size_t i = 0; i < input.size(); ++i) {
+        unsigned char count = 1;
+        // 查找连续相同的字符，最大 255 (因为用1个字节存count)
+        while (i + 1 < input.size() && input[i] == input[i+1] && count < 255) {
+            count++;
+            i++;
+        }
+        output.push_back(static_cast<char>(count));
+        output.push_back(input[i]);
+    }
+}
+
+// --- 算法 5: RLE结业算法 ---
+void rleDecompress(const std::vector<char>& input, std::vector<char>& output) {
+    if (input.empty()) return;
+    for (size_t i = 0; i < input.size(); i += 2) {
+        if (i + 1 >= input.size()) break;
+        const auto count = static_cast<unsigned char>(input[i]);
+        char value = input[i+1];
+        for (int k = 0; k < count; ++k) {
+            output.push_back(value);
+        }
+    }
 }
 
 // ==========================================
@@ -267,36 +301,62 @@ std::vector<FileRecord> BackupEngine::scanDirectory(const std::string& srcPath, 
 }
 
 // === 打包实现 (支持多算法加密) ===
-void BackupEngine::packFiles(const std::vector<FileRecord>& files, const std::string& outputFile, const std::string& password, EncryptionMode mode) {
+void BackupEngine::packFiles(const std::vector<FileRecord>& files, const std::string& outputFile,
+                             const std::string& password, EncryptionMode encMode,
+                             CompressionMode compMode) {
+
     std::ofstream out(outputFile, std::ios::binary);
     if (!out.is_open()) throw std::runtime_error("Cannot create pack file");
 
-    // 1. 写入 Header
-    if (mode == EncryptionMode::RC4 && !password.empty()) {
-        out.write("MINIBK_R", 8); // RC4 Magic
-    } else if (mode == EncryptionMode::XOR && !password.empty()) {
-        out.write("MINIBK_X", 8); // XOR Magic
-    } else {
-        out.write("MINIBK10", 8); // No Encryption
-    }
+    // 1. 写入 Header Magic (8 bytes) - 标识加密模式
+    if (encMode == EncryptionMode::RC4) out.write("MINIBK_R", 8);
+    else if (encMode == EncryptionMode::XOR) out.write("MINIBK_X", 8);
+    else out.write("MINIBK10", 8);
 
-    // 初始化 RC4
+    // 2. [新增] 写入压缩标记 (1 byte) - 标识是否压缩
+    // 0 = 无压缩, 1 = RLE
+    char compFlag = (compMode == CompressionMode::RLE) ? 1 : 0;
+    out.write(&compFlag, 1);
+
+    // 初始化加密器
     RC4 rc4;
-    if (mode == EncryptionMode::RC4 && !password.empty()) {
-        rc4.init(password);
-    }
+    if (encMode == EncryptionMode::RC4 && !password.empty()) rc4.init(password);
 
     int count = 0;
     for (const auto& rec : files) {
         if (rec.type == FileType::OTHER) continue;
 
-        // 构造元数据 buffer: [Type 1] + [PathLen 8] + [Path N] + [DataSize 8]
+        // 准备文件数据
+        std::vector<char> fileData;
+
+        // 读取内容
+        if (rec.type == FileType::REGULAR) {
+            if (std::ifstream inFile(rec.absPath, std::ios::binary); inFile) {
+                fileData.assign(std::istreambuf_iterator<char>(inFile), std::istreambuf_iterator<char>());
+            }
+        } else if (rec.type == FileType::SYMLINK) {
+            fileData.assign(rec.linkTarget.begin(), rec.linkTarget.end());
+        }
+
+        // === 步骤 A: 压缩 ===
+        if (compMode == CompressionMode::RLE) {
+            std::vector<char> compressed;
+            rleCompress(fileData, compressed);
+            fileData = compressed; // 替换为压缩后的数据
+        }
+
+        // === 步骤 B: 加密 (对压缩后的数据加密) ===
+        if (encMode == EncryptionMode::RC4 && !password.empty()) {
+            rc4.cipher(fileData.data(), fileData.size());
+        } else if (encMode == EncryptionMode::XOR && !password.empty()) {
+            xorEncrypt(fileData.data(), fileData.size(), password);
+        }
+
+        // === 步骤 C: 准备 Meta 数据 ===
+        // 注意：这里的 DataSize 必须是【处理后】的大小
         std::vector<char> metaBuffer;
 
-        uint8_t typeCode = 0;
-        if (rec.type == FileType::REGULAR) typeCode = 1;
-        else if (rec.type == FileType::DIRECTORY) typeCode = 2;
-        else if (rec.type == FileType::SYMLINK) typeCode = 3;
+        uint8_t typeCode = (rec.type == FileType::REGULAR ? 1 : (rec.type == FileType::DIRECTORY ? 2 : 3));
         metaBuffer.push_back(static_cast<char>(typeCode));
 
         uint64_t pathLen = rec.relPath.size();
@@ -304,69 +364,40 @@ void BackupEngine::packFiles(const std::vector<FileRecord>& files, const std::st
         metaBuffer.insert(metaBuffer.end(), pLen, pLen + 8);
         metaBuffer.insert(metaBuffer.end(), rec.relPath.begin(), rec.relPath.end());
 
-        uint64_t dataSize = rec.size;
-        auto pSize = reinterpret_cast<const char*>(&dataSize);
+        uint64_t finalSize = fileData.size(); // 处理后的大小
+        const char* pSize = reinterpret_cast<const char*>(&finalSize);
         metaBuffer.insert(metaBuffer.end(), pSize, pSize + 8);
 
-        // 加密元数据
-        if (mode == EncryptionMode::RC4 && !password.empty()) {
-            rc4.cipher(metaBuffer.data(), metaBuffer.size());
-        } else if (mode == EncryptionMode::XOR && !password.empty()) {
-            xorEncrypt(metaBuffer.data(), metaBuffer.size(), password);
-        }
+        // 加密 Meta
+        if (encMode == EncryptionMode::RC4 && !password.empty()) rc4.cipher(metaBuffer.data(), metaBuffer.size());
+        else if (encMode == EncryptionMode::XOR && !password.empty()) xorEncrypt(metaBuffer.data(), metaBuffer.size(), password);
 
-        // 写入元数据
-        out.write(metaBuffer.data(), static_cast<std::streamsize>(metaBuffer.size()));
+        // 写入 Meta
+        out.write(metaBuffer.data(), metaBuffer.size());
 
-        // 处理文件内容/软链目标
-        if (rec.type == FileType::REGULAR) {
-            if (std::ifstream inFile(rec.absPath, std::ios::binary); inFile) {
-                char buffer[4096];
-                while (inFile.read(buffer, sizeof(buffer)) || inFile.gcount() > 0) {
-                    std::streamsize bytesRead = inFile.gcount();
-
-                    if (mode == EncryptionMode::RC4 && !password.empty()) {
-                        rc4.cipher(buffer, bytesRead);
-                    } else if (mode == EncryptionMode::XOR && !password.empty()) {
-                        xorEncrypt(buffer, bytesRead, password);
-                    }
-
-                    out.write(buffer, bytesRead);
-                }
-            }
-        } else if (rec.type == FileType::SYMLINK) {
-            std::string target = rec.linkTarget;
-
-            if (mode == EncryptionMode::RC4 && !password.empty()) {
-                rc4.cipher(&target[0], target.size());
-            } else if (mode == EncryptionMode::XOR && !password.empty()) {
-                xorEncrypt(&target[0], target.size(), password);
-            }
-
-            out.write(target.c_str(), static_cast<std::streamsize>(target.size()));
+        // 写入数据主体
+        if (!fileData.empty()) {
+            out.write(fileData.data(), fileData.size());
         }
         count++;
     }
     out.close();
-
-    std::string modeStr = "None";
-    if (mode == EncryptionMode::RC4) modeStr = "RC4";
-    else if (mode == EncryptionMode::XOR) modeStr = "Simple XOR";
-
-    std::cout << "[Pack] Done. Items: " << count << ", Encrypt: " << modeStr << std::endl;
+    std::cout << "[Pack] Done. Items: " << count
+              << ", Enc: " << static_cast<int>(encMode)
+              << ", Comp: " << static_cast<int>(compMode) << std::endl;
 }
 
 // 修改：pack 入口传入 filter
 void BackupEngine::pack(const std::string& srcPath, const std::string& outputFile,
-                        const std::string& password, const EncryptionMode mode,
-                        const FilterOptions& filter) {
+                        const std::string& password, const EncryptionMode encMode,
+                        const FilterOptions& filter, const CompressionMode compMode) {
 
     std::cout << "Scanning with filters..." << std::endl;
     // 传入 filter
     const auto files = scanDirectory(srcPath, filter);
 
     std::cout << "Packing " << files.size() << " files..." << std::endl;
-    packFiles(files, outputFile, password, mode);
+    packFiles(files, outputFile, password, encMode, compMode);
 }
 
 // === 解包实现 (自动识别算法) ===
@@ -377,92 +408,94 @@ void BackupEngine::unpack(const std::string& packFile, const std::string& destPa
     fs::path destRoot(destPath);
     if (!fs::exists(destRoot)) fs::create_directories(destRoot);
 
-    // 1. 读取 Header
+    // 1. 读取 Header Magic (8 bytes)
     char magic[9] = {0};
     in.read(magic, 8);
     std::string magicStr(magic);
 
-    auto mode = EncryptionMode::NONE;
-    if (magicStr == "MINIBK_R") mode = EncryptionMode::RC4;
-    else if (magicStr == "MINIBK_X") mode = EncryptionMode::XOR;
-    else if (magicStr == "MINIBK10") mode = EncryptionMode::NONE;
-    else throw std::runtime_error("Unknown file format");
+    EncryptionMode encMode = EncryptionMode::NONE;
+    if (magicStr == "MINIBK_R") encMode = EncryptionMode::RC4;
+    else if (magicStr == "MINIBK_X") encMode = EncryptionMode::XOR;
+    else if (magicStr != "MINIBK10") throw std::runtime_error("Unknown file format");
 
-    if (mode != EncryptionMode::NONE && password.empty()) {
+    // 2. [新增] 读取 Compression Flag (1 byte)
+    char compFlag = 0;
+    in.read(&compFlag, 1);
+    bool isRLE = (compFlag == 1);
+
+    if (encMode != EncryptionMode::NONE && password.empty()) {
         throw std::runtime_error("Password required!");
     }
 
     RC4 rc4;
-    if (mode == EncryptionMode::RC4) rc4.init(password);
+    if (encMode == EncryptionMode::RC4) rc4.init(password);
 
-    std::cout << "[Unpack] Encryption Mode detected: " << (mode == EncryptionMode::RC4 ? "RC4" : (mode == EncryptionMode::XOR ? "XOR" : "None")) << std::endl;
+    std::cout << "[Unpack] Enc: " << static_cast<int>(encMode) << ", Comp: " << (isRLE ? "RLE" : "None") << std::endl;
 
     while (in.peek() != EOF) {
-        // 读取 Type
+        // --- 读取 Meta (Type, PathLen, Path, DataSize) ---
+        // 逻辑：读取 -> 解密 -> 解析
+
+        // 1. Type
         char typeBuf[1];
         in.read(typeBuf, 1);
         if (in.gcount() == 0) break;
-
-        if (mode == EncryptionMode::RC4) rc4.cipher(typeBuf, 1);
-        else if (mode == EncryptionMode::XOR) xorEncrypt(typeBuf, 1, password);
+        if (encMode == EncryptionMode::RC4) rc4.cipher(typeBuf, 1);
+        else if (encMode == EncryptionMode::XOR) xorEncrypt(typeBuf, 1, password);
         auto typeCode = static_cast<uint8_t>(typeBuf[0]);
 
-        // 读取 PathLen
+        // 2. PathLen
         char lenBuf[8];
         in.read(lenBuf, 8);
-        if (mode == EncryptionMode::RC4) rc4.cipher(lenBuf, 8);
-        else if (mode == EncryptionMode::XOR) xorEncrypt(lenBuf, 8, password);
+        if (encMode == EncryptionMode::RC4) rc4.cipher(lenBuf, 8);
+        else if (encMode == EncryptionMode::XOR) xorEncrypt(lenBuf, 8, password);
         uint64_t pathLen = *reinterpret_cast<uint64_t*>(lenBuf);
 
-        // 读取 Path
+        // 3. Path
         std::vector<char> pathBuf(pathLen);
-        in.read(pathBuf.data(), static_cast<std::streamsize>(pathLen));
-        if (mode == EncryptionMode::RC4) rc4.cipher(pathBuf.data(), pathLen);
-        else if (mode == EncryptionMode::XOR) xorEncrypt(pathBuf.data(), pathLen, password);
+        in.read(pathBuf.data(), pathLen);
+        if (encMode == EncryptionMode::RC4) rc4.cipher(pathBuf.data(), pathLen);
+        else if (encMode == EncryptionMode::XOR) xorEncrypt(pathBuf.data(), pathLen, password);
         std::string relPath(pathBuf.begin(), pathBuf.end());
 
-        // 读取 DataSize
+        // 4. DataSize (这是存储在包里的大小)
         char sizeBuf[8];
         in.read(sizeBuf, 8);
-        if (mode == EncryptionMode::RC4) rc4.cipher(sizeBuf, 8);
-        else if (mode == EncryptionMode::XOR) xorEncrypt(sizeBuf, 8, password);
+        if (encMode == EncryptionMode::RC4) rc4.cipher(sizeBuf, 8);
+        else if (encMode == EncryptionMode::XOR) xorEncrypt(sizeBuf, 8, password);
         uint64_t dataSize = *reinterpret_cast<uint64_t*>(sizeBuf);
 
-        // 还原逻辑
+        // --- 读取并处理数据 ---
         fs::path fullPath = destRoot / relPath;
 
+        std::vector<char> fileData(dataSize);
+        if (dataSize > 0) {
+            in.read(fileData.data(), dataSize);
+
+            // 步骤 A: 先解密
+            if (encMode == EncryptionMode::RC4) rc4.cipher(fileData.data(), dataSize);
+            else if (encMode == EncryptionMode::XOR) xorEncrypt(fileData.data(), dataSize, password);
+
+            // 步骤 B: 再解压 (如果是 RLE)
+            if (isRLE) {
+                std::vector<char> decompressed;
+                rleDecompress(fileData, decompressed);
+                fileData = decompressed; // 还原为原始数据
+            }
+        }
+
+        // --- 写入磁盘 ---
         if (typeCode == 2) { // 目录
              fs::create_directories(fullPath);
         } else if (typeCode == 3) { // 软链接
-            std::vector<char> linkBuf(dataSize);
-            in.read(linkBuf.data(), static_cast<std::streamsize>(dataSize));
-
-            if (mode == EncryptionMode::RC4) rc4.cipher(linkBuf.data(), dataSize);
-            else if (mode == EncryptionMode::XOR) xorEncrypt(linkBuf.data(), dataSize, password);
-
-            std::string target(linkBuf.begin(), linkBuf.end());
+            std::string target(fileData.begin(), fileData.end());
             if (fullPath.has_parent_path()) fs::create_directories(fullPath.parent_path());
             if (fs::exists(fullPath) || fs::is_symlink(fullPath)) fs::remove(fullPath);
             fs::create_symlink(target, fullPath);
-            std::cout << "  Restored Link: " << relPath << std::endl;
         } else if (typeCode == 1) { // 普通文件
             if (fullPath.has_parent_path()) fs::create_directories(fullPath.parent_path());
             std::ofstream outFile(fullPath, std::ios::binary);
-
-            char buffer[4096];
-            uint64_t remaining = dataSize;
-            while (remaining > 0) {
-                uint64_t toRead = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
-                in.read(buffer, static_cast<std::streamsize>(toRead));
-
-                if (mode == EncryptionMode::RC4) rc4.cipher(buffer, toRead);
-                else if (mode == EncryptionMode::XOR) xorEncrypt(buffer, toRead, password);
-
-                outFile.write(buffer, static_cast<std::streamsize>(toRead));
-                remaining -= toRead;
-            }
-            std::cout << "  Restored File: " << relPath << std::endl;
+            outFile.write(fileData.data(), fileData.size());
         }
     }
-    std::cout << "[Unpack] Done." << std::endl;
 }

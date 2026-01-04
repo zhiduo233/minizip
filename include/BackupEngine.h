@@ -23,6 +23,12 @@ struct FileRecord {
     FileType type;          // 类型
     uint64_t size;          // 大小 (或链接长度)
     std::string linkTarget; // 软链接指向的目标
+
+    // --- 元数据 ---
+    uint32_t mode = 0;   // 权限
+    int64_t mtime = 0;   // 修改时间 (时间戳)
+    uint32_t uid = 0;    // 用户ID
+    uint32_t gid = 0;    // 组ID
 };
 
 // [新增] 加密模式枚举
@@ -30,6 +36,12 @@ enum class EncryptionMode {
     NONE, // 不加密
     XOR,  // 简单异或 (算法1)
     RC4   // RC4 流密码 (算法2 - 进阶)
+};
+
+// 压缩模式枚举
+enum class CompressionMode {
+    NONE,
+    RLE
 };
 
 struct FilterOptions {
@@ -66,8 +78,9 @@ public:
     // pack: 支持指定密码和加密模式
     static void pack(const std::string& srcPath, const std::string& outputFile,
                      const std::string& password = "",
-                     EncryptionMode mode = EncryptionMode::NONE,
-                     const FilterOptions& filter = FilterOptions()); // 默认全选
+                     EncryptionMode encMode = EncryptionMode::NONE,
+                     const FilterOptions& filter = FilterOptions(),
+                     CompressionMode compMode = CompressionMode::NONE); // 默认全选
 
     // unpack: 只需要密码，模式由文件头自动识别
     static void unpack(const std::string& packFile, const std::string& destPath,
@@ -77,7 +90,8 @@ private:
     // 内部辅助函数
     static std::vector<FileRecord> scanDirectory(const std::string& srcPath, const FilterOptions& filter);
     static void packFiles(const std::vector<FileRecord>& files, const std::string& outputFile,
-                          const std::string& password, EncryptionMode mode);
+                          const std::string& password, EncryptionMode encMode,
+                          CompressionMode compMode);
 };
 
 #endif //MINIBACKUP_BACKUPENGINE_H
